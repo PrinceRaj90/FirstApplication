@@ -233,9 +233,7 @@ wss.on('connection', (ws) => {
                 idToWs.set(data.id, ws);
                 
                 log(`INIT SUCCESS: User ${data.id} registered in memory.`);
-            } 
-
-            else if (data.type === 'find_match') {
+            }            else if (data.type === 'find_match') {
                 const info = wsClients.get(ws);
                 if (!info) { log("MATCH: No info found for WS"); return; }
                 const myCol = info.collection;
@@ -243,12 +241,12 @@ wss.on('connection', (ws) => {
                 const myGender = myCol === 'male_users' ? 'male' : 'female';
                 const sleep = ms => new Promise(res => setTimeout(res, ms));
 
-                log(`MATCH START: User ${info.id} (${myGender}) seeking ${pref}`);
+                log(`MATCH START: ${info.id} (${myGender}) seeking ${pref}`);
 
-                // 1. Force state reset and mark as searching
+                // 1. Enter the pool
                 await db.collection(myCol).updateOne(
                     { id: info.id }, 
-                    { $set: { status: 'online', occupied: 'no', searching_for: pref } }
+                    { $set: { status: 'online', occupied: 'no', searching_for: pref, handshake: null } }
                 );
 
                 const myBlocks = await db.collection('blocks').find({ blocker_id: info.id }).toArray();
@@ -256,23 +254,30 @@ wss.on('connection', (ws) => {
                 const excludedIds = [info.id, ...myBlocks.map(b=>b.blocked_id), ...blockedMe.map(b=>b.blocker_id)];
 
                 let matchId = null; 
-                let finalOppCol = null;
+                let partnerCol = null;
 
-                // 2. SEARCH LOOP (5s)
-                for (let attempt = 0; attempt < 10; attempt++) {
+                // 2. HANSHAKE LOOP (Up to 8 seconds)
+                for (let attempt = 0; attempt < 16; attempt++) {
+                    // Check if someone else FOUND and CLAIMED us
                     const me = await db.collection(myCol).findOne({ id: info.id });
-                    if (me && me.occupied === 'yes') {
-                        log(`MATCH RESOLVED: User ${info.id} matched by external context.`);
-                        return; 
+                    if (me && me.handshake) {
+                        matchId = me.handshake;
+                        log(`MATCH HANDSHAKE: ${info.id} was claimed by ${matchId}`);
+                        // Determine partner's collection
+                        const mCheck = await db.collection('male_users').findOne({ id: matchId });
+                        partnerCol = mCheck ? 'male_users' : 'female_users';
+                        break;
                     }
 
+                    // Strict Specific / Hybrid Random Logic
                     let colsToCheck = pref === 'random' ? ['female_users', 'male_users'] : (pref === 'female' ? ['female_users'] : ['male_users']);
                     
                     for (let oppCol of colsToCheck) {
                         const targets = [myGender, 'random'];
+                        // Try to ATOMICALLY claim someone
                         const match = await db.collection(oppCol).findOneAndUpdate(
                             { status: 'online', occupied: 'no', searching_for: { $in: targets }, id: { $nin: excludedIds } },
-                            { $set: { occupied: 'yes', searching_for: null } },
+                            { $set: { occupied: 'yes', searching_for: null, handshake: info.id } },
                             { returnDocument: 'after' }
                         );
 
@@ -280,8 +285,10 @@ wss.on('connection', (ws) => {
                             const foundDoc = match.value || match;
                             if (foundDoc && foundDoc.id) {
                                 matchId = foundDoc.id;
-                                finalOppCol = oppCol;
-                                log(`MATCH FIND: ${info.id} found doc ${matchId} in ${oppCol}`);
+                                partnerCol = oppCol;
+                                log(`MATCH CLAIM: ${info.id} claimed ${matchId} from ${oppCol}`);
+                                // Mark SELF as occupied as well
+                                await db.collection(myCol).updateOne({ id: info.id }, { $set: { occupied: 'yes', searching_for: null } });
                                 break;
                             }
                         }
@@ -293,27 +300,28 @@ wss.on('connection', (ws) => {
 
                 if (matchId) {
                     const partnerWs = idToWs.get(matchId);
-                    log(`MATCH SYNC: Partner ID ${matchId} -> WS is ${partnerWs ? 'PRESENT' : 'MISSING (LOAD BALANCER?)'}`);
-                    
                     if (partnerWs && wsClients.has(partnerWs)) {
-                        await db.collection(myCol).updateOne({ id: info.id }, { $set: { occupied: 'yes', searching_for: null } });
-                        
                         info.partnerWs = partnerWs;
                         wsClients.get(partnerWs).partnerWs = ws;
                         
                         const me = await db.collection(myCol).findOne({ id: info.id });
-                        const pt = await db.collection(finalOppCol).findOne({ id: matchId });
+                        const pt = await db.collection(partnerCol).findOne({ id: matchId });
                         
-                        ws.send(JSON.stringify({ type: 'matched', partner_id: matchId, partner_name: pt.name, partner_age: pt.age }));
-                        partnerWs.send(JSON.stringify({ type: 'matched', partner_id: info.id, partner_name: me.name, partner_age: me.age }));
-                        log(`MATCH SUCCESS: ${info.id} bonded with ${matchId}`);
+                        const matchedPayloadMe = { type: 'matched', partner_id: matchId, partner_name: pt.name, partner_age: pt.age };
+                        const matchedPayloadPt = { type: 'matched', partner_id: info.id, partner_name: me.name, partner_age: me.age };
+                        
+                        ws.send(JSON.stringify(matchedPayloadMe));
+                        partnerWs.send(JSON.stringify(matchedPayloadPt));
+                        log(`MATCH RESOLVED: Bond established between ${info.id} and ${matchId}`);
                     } else {
-                        log(`MATCH FAIL: Rollback ${matchId}. Reason: No local WS pointer.`);
-                        await db.collection(finalOppCol).updateOne({ id: matchId }, { $set: { occupied: 'no', searching_for: pref } });
+                        log(`MATCH ERROR: Partner WS not found for ${matchId}. Rollback.`);
+                        await db.collection(partnerCol).updateOne({ id: matchId }, { $set: { occupied: 'no', handshake: null } });
+                        await db.collection(myCol).updateOne({ id: info.id }, { $set: { occupied: 'no', handshake: null } });
                         ws.send(JSON.stringify({ type: 'no_match_found', retry: true }));
                     }
                 } else {
-                    log(`MATCH TIMEOUT: ${info.id} found no one.`);
+                    log(`MATCH TIMEOUT: ${info.id} found no partners.`);
+                    await db.collection(myCol).updateOne({ id: info.id }, { $set: { occupied: 'no', searching_for: null, handshake: null } });
                     ws.send(JSON.stringify({ type: 'no_match_found' }));
                 }
             }
