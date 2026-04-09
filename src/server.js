@@ -28,7 +28,12 @@ app.get('/debug/stats', (req, res) => {
 });
 
 app.get('/health', (req, res) => {
-    res.json({ status: 'ok', engine: 'Matchmaking Engine 4.1 (Safe Boot)' });
+    res.json({ 
+        status: 'ok', 
+        engine: 'Matchmaking Engine 5.0 (Handshake)',
+        db_connected: !!db,
+        active_ws: wsClients.size
+    });
 });
 
 // Simple log buffer for remote debugging
@@ -56,16 +61,16 @@ async function initDB() {
         log('Main DB Matchmaking Engine initialized.');
         
         // COLD START: Clear all stale matchmaking flags
-        await db.collection('male_users').updateMany({}, { $set: { status: 'offline', occupied: 'no', searching_for: null } });
-        await db.collection('female_users').updateMany({}, { $set: { status: 'offline', occupied: 'no', searching_for: null } });
+        await db.collection('male_users').updateMany({}, { $set: { status: 'offline', occupied: 'no', searching_for: null, handshake: null } });
+        await db.collection('female_users').updateMany({}, { $set: { status: 'offline', occupied: 'no', searching_for: null, handshake: null } });
     } catch (err) {
         log('CRITICAL: Database connection failed: ' + err.message);
     }
 }
 
-server.listen(PORT, '0.0.0.0', () => {
+server.listen(PORT, () => {
     log(`🚀 Primary Server listening on port ${PORT}`);
-    initDB(); // Start DB in background
+    initDB(); 
 });
 
 // Unique ID Generator
