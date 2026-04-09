@@ -216,9 +216,19 @@ wss.on('connection', (ws) => {
             
             if (data.type === 'init') {
                 const col = data.sex === 'female' ? 'female_users' : 'male_users';
+                
+                // CRITICAL FIX: Clear any old 'ghost' connections for this ID
+                const oldWs = idToWs.get(data.id);
+                if (oldWs && oldWs !== ws) {
+                    wsClients.delete(oldWs);
+                }
+
+                await db.collection(col).updateOne({ id: data.id }, { $set: { status: 'online', occupied: 'no' } });
+
                 wsClients.set(ws, { id: data.id, collection: col, partnerWs: null });
                 idToWs.set(data.id, ws);
-                await db.collection(col).updateOne({ id: data.id }, { $set: { status: 'online', occupied: 'no' } });
+                
+                log(`INIT SUCCESS: User ${data.id} registered in memory.`);
             } 
 
             else if (data.type === 'find_match') {
