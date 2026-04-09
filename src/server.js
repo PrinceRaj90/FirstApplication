@@ -30,7 +30,7 @@ app.get('/debug/stats', (req, res) => {
 app.get('/health', (req, res) => {
     res.json({ 
         status: 'ok', 
-        engine: 'Matchmaking Engine 5.0 (Handshake)',
+        engine: 'Matchmaking Engine 5.2 (Handshake Sync)',
         db_connected: !!db,
         active_ws: wsClients.size
     });
