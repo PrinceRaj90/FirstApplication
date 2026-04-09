@@ -224,23 +224,21 @@ wss.on('connection', (ws) => {
                 const blockedMe = await db.collection('blocks').find({ blocked_id: info.id }).toArray();
                 const excludedIds = [info.id, ...myBlocks.map(b=>b.blocked_id), ...blockedMe.map(b=>b.blocker_id)];
 
-                let matchId = null; 
-                let finalOppCol = null;
+                console.log(`[MATCH] User ${info.id} (${myGender}) seeking ${pref} started search.`);
 
                 // 2. SMART QUEUE: Loop for 5 seconds to find a partner
                 for (let attempt = 0; attempt < 10; attempt++) {
-                    // Refresh current status (in case someone found US while we were sleeping)
                     const meAtMoment = await db.collection(myCol).findOne({ id: info.id });
                     if (meAtMoment.occupied === 'yes') {
-                        // Someone else found us! We are already matched.
+                        console.log(`[MATCH] User ${info.id} matched by someone else.`);
                         return; 
                     }
 
                     let colsToCheck = pref === 'random' ? ['female_users', 'male_users'] : (pref === 'female' ? ['female_users'] : ['male_users']);
                     
                     for (let oppCol of colsToCheck) {
-                        // Inclusive Targets: They must be looking for US (random or my gender)
                         const oppTargets = [myGender, 'random'];
+                        console.log(`[MATCH] ${info.id} checking ${oppCol} for targets ${oppTargets}`);
                         
                         const match = await db.collection(oppCol).findOneAndUpdate(
                             { 
@@ -254,17 +252,19 @@ wss.on('connection', (ws) => {
 
                         if (match) { 
                             matchId = (match.value ? match.value.id : match.id); 
+                            console.log(`[MATCH] ${info.id} found potential partner ${matchId}`);
                             finalOppCol = oppCol; 
                             break; 
                         }
                     }
 
                     if (matchId) break;
-                    await sleep(500); // Check every 500ms
+                    await sleep(500);
                 }
 
                 if (matchId) {
                     const partnerWs = idToWs.get(matchId);
+                    console.log(`[MATCH] Partner WS for ${matchId} is ${partnerWs ? 'READY' : 'NULL'}`);
                     if (partnerWs && wsClients.has(partnerWs)) {
                         // Success matching! Mark self as occupied.
                         await db.collection(myCol).updateOne({ id: info.id }, { $set: { occupied: 'yes', searching_for: null } });
