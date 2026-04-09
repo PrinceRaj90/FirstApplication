@@ -19,6 +19,18 @@ app.get('/debug/logs', (req, res) => {
     res.send(serverLogs.join('\n'));
 });
 
+app.get('/debug/stats', (req, res) => {
+    res.json({
+        active_ws: wsClients.size,
+        tracked_ids: idToWs.size,
+        uptime: process.uptime()
+    });
+});
+
+app.get('/health', (req, res) => {
+    res.json({ status: 'ok', engine: 'Matchmaking Engine 4.0' });
+});
+
 // Simple log buffer for remote debugging
 let serverLogs = [];
 const log = (msg) => {
@@ -43,13 +55,8 @@ async function initDB() {
         
         await db.collection('male_users').createIndex({ username: 1 }, { unique: true });
         await db.collection('female_users').createIndex({ username: 1 }, { unique: true });
-        await db.collection('male_users').createIndex({ id: 1 }, { unique: true });
-        await db.collection('female_users').createIndex({ id: 1 }, { unique: true });
-        await db.collection('friendships').createIndex({ user1_id: 1, user2_id: 1 }, { unique: true });
-        await db.collection('blocks').createIndex({ blocker_id: 1, blocked_id: 1 }, { unique: true });
-        await db.collection('messages').createIndex({ roomId: 1 });
         
-        // Reset all statuses on start
+        // COLD START: Clear all stale matchmaking flags
         await db.collection('male_users').updateMany({}, { $set: { status: 'offline', occupied: 'no', searching_for: null } });
         await db.collection('female_users').updateMany({}, { $set: { status: 'offline', occupied: 'no', searching_for: null } });
         
