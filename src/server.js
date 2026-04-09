@@ -393,3 +393,6 @@ wss.on('connection', (ws) => {
         wsClients.delete(ws);
     });
 });
+
+// START THE ENGINE
+initDB();
