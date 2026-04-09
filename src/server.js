@@ -14,6 +14,20 @@ const app = express();
 app.use(cors());
 app.use(express.json()); 
 
+app.get('/debug/logs', (req, res) => {
+    res.set('Content-Type', 'text/plain');
+    res.send(serverLogs.join('\n'));
+});
+
+// Simple log buffer for remote debugging
+let serverLogs = [];
+const log = (msg) => {
+    const entry = `[${new Date().toISOString()}] ${msg}`;
+    console.log(entry);
+    serverLogs.push(entry);
+    if (serverLogs.length > 200) serverLogs.shift();
+};
+
 // === DATABASE SETUP (MONGODB) ===
 const uri = process.env.MONGO_URL || 'mongodb://localhost:27017/chat_app';
 const client = new MongoClient(uri);
@@ -209,11 +223,13 @@ wss.on('connection', (ws) => {
 
             else if (data.type === 'find_match') {
                 const info = wsClients.get(ws);
-                if (!info) return;
+                if (!info) { log("MATCH: No info found for WS"); return; }
                 const myCol = info.collection;
                 const pref = data.seeking_gender; 
                 const myGender = myCol === 'male_users' ? 'male' : 'female';
                 const sleep = ms => new Promise(res => setTimeout(res, ms));
+
+                log(`MATCH START: User ${info.id} (${myGender}) seeking ${pref}`);
 
                 // 1. Force state reset and mark as searching
                 await db.collection(myCol).updateOne(
@@ -232,7 +248,7 @@ wss.on('connection', (ws) => {
                 for (let attempt = 0; attempt < 10; attempt++) {
                     const me = await db.collection(myCol).findOne({ id: info.id });
                     if (me && me.occupied === 'yes') {
-                        // We were matched by someone else! Success.
+                        log(`MATCH RESOLVED: User ${info.id} matched by external context.`);
                         return; 
                     }
 
@@ -241,14 +257,9 @@ wss.on('connection', (ws) => {
                     for (let oppCol of colsToCheck) {
                         const targets = [myGender, 'random'];
                         const match = await db.collection(oppCol).findOneAndUpdate(
-                            { 
-                                status: 'online', 
-                                occupied: 'no', 
-                                searching_for: { $in: targets }, 
-                                id: { $nin: excludedIds } 
-                            },
+                            { status: 'online', occupied: 'no', searching_for: { $in: targets }, id: { $nin: excludedIds } },
                             { $set: { occupied: 'yes', searching_for: null } },
-                            { returnDocument: 'after' } // Ensure we get the document back
+                            { returnDocument: 'after' }
                         );
 
                         if (match) { 
@@ -256,6 +267,7 @@ wss.on('connection', (ws) => {
                             if (foundDoc && foundDoc.id) {
                                 matchId = foundDoc.id;
                                 finalOppCol = oppCol;
+                                log(`MATCH FIND: ${info.id} found doc ${matchId} in ${oppCol}`);
                                 break;
                             }
                         }
@@ -267,8 +279,9 @@ wss.on('connection', (ws) => {
 
                 if (matchId) {
                     const partnerWs = idToWs.get(matchId);
+                    log(`MATCH SYNC: Partner ID ${matchId} -> WS is ${partnerWs ? 'PRESENT' : 'MISSING (LOAD BALANCER?)'}`);
+                    
                     if (partnerWs && wsClients.has(partnerWs)) {
-                        // ATOMIC PAIRING: Mark self as busy
                         await db.collection(myCol).updateOne({ id: info.id }, { $set: { occupied: 'yes', searching_for: null } });
                         
                         info.partnerWs = partnerWs;
@@ -279,12 +292,14 @@ wss.on('connection', (ws) => {
                         
                         ws.send(JSON.stringify({ type: 'matched', partner_id: matchId, partner_name: pt.name, partner_age: pt.age }));
                         partnerWs.send(JSON.stringify({ type: 'matched', partner_id: info.id, partner_name: me.name, partner_age: me.age }));
+                        log(`MATCH SUCCESS: ${info.id} bonded with ${matchId}`);
                     } else {
-                        // Rollback only if partner vanished
+                        log(`MATCH FAIL: Rollback ${matchId}. Reason: No local WS pointer.`);
                         await db.collection(finalOppCol).updateOne({ id: matchId }, { $set: { occupied: 'no', searching_for: pref } });
                         ws.send(JSON.stringify({ type: 'no_match_found', retry: true }));
                     }
                 } else {
+                    log(`MATCH TIMEOUT: ${info.id} found no one.`);
                     ws.send(JSON.stringify({ type: 'no_match_found' }));
                 }
             }
