@@ -213,8 +213,6 @@ wss.on('connection', (ws) => {
                 const myCol = info.collection;
                 const pref = data.seeking_gender; 
                 const myGender = myCol === 'male_users' ? 'male' : 'female';
-
-                // Helper to wait
                 const sleep = ms => new Promise(res => setTimeout(res, ms));
 
                 // 1. Mark yourself as searching
@@ -224,35 +222,30 @@ wss.on('connection', (ws) => {
                 const blockedMe = await db.collection('blocks').find({ blocked_id: info.id }).toArray();
                 const excludedIds = [info.id, ...myBlocks.map(b=>b.blocked_id), ...blockedMe.map(b=>b.blocker_id)];
 
-                console.log(`[MATCH] User ${info.id} (${myGender}) seeking ${pref} started search.`);
+                let matchId = null; let finalOppCol = null;
 
-                // 2. SMART QUEUE: Loop for 5 seconds to find a partner
+                // 2. SMART SEARCH LOOP (5 Seconds)
                 for (let attempt = 0; attempt < 10; attempt++) {
-                    const meAtMoment = await db.collection(myCol).findOne({ id: info.id });
-                    if (meAtMoment.occupied === 'yes') {
-                        console.log(`[MATCH] User ${info.id} matched by someone else.`);
+                    // Check if someone else FOUND us while we were waiting
+                    const me = await db.collection(myCol).findOne({ id: info.id });
+                    if (me && me.occupied === 'yes') {
+                        // Success! The partner's context already handled the WS pairing.
                         return; 
                     }
 
+                    // Strict Gender honoring
                     let colsToCheck = pref === 'random' ? ['female_users', 'male_users'] : (pref === 'female' ? ['female_users'] : ['male_users']);
                     
                     for (let oppCol of colsToCheck) {
-                        const oppTargets = [myGender, 'random'];
-                        console.log(`[MATCH] ${info.id} checking ${oppCol} for targets ${oppTargets}`);
-                        
+                        // Goal: Find someone looking for MY gender or Random
+                        const targets = [myGender, 'random'];
                         const match = await db.collection(oppCol).findOneAndUpdate(
-                            { 
-                                status: 'online', 
-                                occupied: 'no', 
-                                searching_for: { $in: oppTargets }, 
-                                id: { $nin: excludedIds } 
-                            },
+                            { status: 'online', occupied: 'no', searching_for: { $in: targets }, id: { $nin: excludedIds } },
                             { $set: { occupied: 'yes', searching_for: null } }
                         );
 
                         if (match) { 
                             matchId = (match.value ? match.value.id : match.id); 
-                            console.log(`[MATCH] ${info.id} found potential partner ${matchId}`);
                             finalOppCol = oppCol; 
                             break; 
                         }
@@ -264,9 +257,7 @@ wss.on('connection', (ws) => {
 
                 if (matchId) {
                     const partnerWs = idToWs.get(matchId);
-                    console.log(`[MATCH] Partner WS for ${matchId} is ${partnerWs ? 'READY' : 'NULL'}`);
                     if (partnerWs && wsClients.has(partnerWs)) {
-                        // Success matching! Mark self as occupied.
                         await db.collection(myCol).updateOne({ id: info.id }, { $set: { occupied: 'yes', searching_for: null } });
                         
                         info.partnerWs = partnerWs;
@@ -278,12 +269,11 @@ wss.on('connection', (ws) => {
                         ws.send(JSON.stringify({ type: 'matched', partner_id: matchId, partner_name: pt.name, partner_age: pt.age }));
                         partnerWs.send(JSON.stringify({ type: 'matched', partner_id: info.id, partner_name: me.name, partner_age: me.age }));
                     } else {
-                        // Rollback partner if they disappeared during the 500ms window
-                        await db.collection(finalOppCol).updateOne({ id: matchId }, { $set: { occupied: 'no' } });
+                        // Rollback only if partner vanished
+                        await db.collection(finalOppCol).updateOne({ id: matchId }, { $set: { occupied: 'no', searching_for: pref } });
                         ws.send(JSON.stringify({ type: 'no_match_found' }));
                     }
                 } else {
-                    // No match found after 5 seconds
                     ws.send(JSON.stringify({ type: 'no_match_found' }));
                 }
             }
