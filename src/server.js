@@ -213,7 +213,9 @@ wss.on('connection', (ws) => {
                 const myCol = info.collection;
                 const pref = data.seeking_gender; 
                 const myGender = myCol === 'male_users' ? 'male' : 'female';
-                await db.collection(myCol).updateOne({ id: info.id }, { $set: { searching_for: pref } });
+
+                // 1. Mark yourself as looking (but stay 'no' so others can find you)
+                await db.collection(myCol).updateOne({ id: info.id }, { $set: { searching_for: pref, occupied: 'no' } });
                 
                 let colsToCheck = pref === 'random' ? ['female_users', 'male_users'] : (pref === 'female' ? ['female_users'] : ['male_users']);
                 let targets = pref === 'random' ? ['random'] : [myGender];
@@ -222,36 +224,42 @@ wss.on('connection', (ws) => {
                 const blockedMe = await db.collection('blocks').find({ blocked_id: info.id }).toArray();
                 const excludedIds = [info.id, ...myBlocks.map(b=>b.blocked_id), ...blockedMe.map(b=>b.blocker_id)];
 
-                const lockSelf = await db.collection(myCol).findOneAndUpdate(
-                    { id: info.id, occupied: 'no' },
-                    { $set: { occupied: 'searching' } }
-                );
-                if (!lockSelf) return;
-
+                // 2. ATOMIC SEARCH: Look for a partner and claim them instantly
                 let matchId = null; let finalOppCol = null;
                 for (let oppCol of colsToCheck) {
                     const match = await db.collection(oppCol).findOneAndUpdate(
                         { status: 'online', occupied: 'no', searching_for: { $in: targets }, id: { $nin: excludedIds } },
                         { $set: { occupied: 'yes', searching_for: null } }
                     );
-                    if (match) { matchId = match.id; finalOppCol = oppCol; break; }
+                    if (match) { 
+                        // We found someone!
+                        matchId = (match.value ? match.value.id : match.id); 
+                        finalOppCol = oppCol; 
+                        break; 
+                    }
                 }
 
                 if (matchId) {
                     const partnerWs = idToWs.get(matchId);
                     if (partnerWs && wsClients.has(partnerWs)) {
+                        // 3. Mark ourselves as occupied too
                         await db.collection(myCol).updateOne({ id: info.id }, { $set: { occupied: 'yes', searching_for: null } });
+                        
                         info.partnerWs = partnerWs;
                         wsClients.get(partnerWs).partnerWs = ws;
+                        
                         const me = await db.collection(myCol).findOne({ id: info.id });
                         const pt = await db.collection(finalOppCol).findOne({ id: matchId });
+                        
                         ws.send(JSON.stringify({ type: 'matched', partner_id: matchId, partner_name: pt.name, partner_age: pt.age }));
                         partnerWs.send(JSON.stringify({ type: 'matched', partner_id: info.id, partner_name: me.name, partner_age: me.age }));
                     } else {
+                        // Rollback if partner disconnected during the atomic window
+                        await db.collection(finalOppCol).updateOne({ id: matchId }, { $set: { occupied: 'no' } });
                         await db.collection(myCol).updateOne({ id: info.id }, { $set: { occupied: 'no' } });
                     }
                 } else {
-                    await db.collection(myCol).updateOne({ id: info.id }, { $set: { occupied: 'no' } });
+                    // No match found immediately, we stay in the pool with searching_for set
                     ws.send(JSON.stringify({ type: 'no_match_found' }));
                 }
             }
