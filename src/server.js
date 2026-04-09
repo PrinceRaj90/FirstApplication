@@ -248,10 +248,10 @@ wss.on('connection', (ws) => {
                         ws.send(JSON.stringify({ type: 'matched', partner_id: matchId, partner_name: pt.name, partner_age: pt.age }));
                         partnerWs.send(JSON.stringify({ type: 'matched', partner_id: info.id, partner_name: me.name, partner_age: me.age }));
                     } else {
-                        await db.collection(myCol).updateOne({ id: info.id }, { $set: { occupied: 'no', searching_for: null } });
+                        await db.collection(myCol).updateOne({ id: info.id }, { $set: { occupied: 'no' } });
                     }
                 } else {
-                    await db.collection(myCol).updateOne({ id: info.id }, { $set: { occupied: 'no', searching_for: null } });
+                    await db.collection(myCol).updateOne({ id: info.id }, { $set: { occupied: 'no' } });
                     ws.send(JSON.stringify({ type: 'no_match_found' }));
                 }
             }
