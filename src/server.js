@@ -15,7 +15,7 @@ app.use(cors());
 app.use(express.json()); 
 
 // === DATABASE SETUP (MONGODB) ===
-const uri = process.env.MONGO_URI || 'mongodb://localhost:27017/chat_app';
+const uri = process.env.MONGO_URL || 'mongodb://localhost:27017/chat_app';
 const client = new MongoClient(uri);
 let db;
 
