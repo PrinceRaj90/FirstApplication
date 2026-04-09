@@ -50,26 +50,23 @@ const wss = new WebSocketServer({ server });
 
 async function initDB() {
     try {
+        log('Connecting to MongoDB...');
         await client.connect();
         db = client.db('chat_app');
-        
-        await db.collection('male_users').createIndex({ username: 1 }, { unique: true });
-        await db.collection('female_users').createIndex({ username: 1 }, { unique: true });
+        log('Main DB Matchmaking Engine initialized.');
         
         // COLD START: Clear all stale matchmaking flags
         await db.collection('male_users').updateMany({}, { $set: { status: 'offline', occupied: 'no', searching_for: null } });
         await db.collection('female_users').updateMany({}, { $set: { status: 'offline', occupied: 'no', searching_for: null } });
-        
-        console.log('Main DB Matchmaking Engine initialized.');
-        
-        server.listen(PORT, IP, () => {
-            console.log(`🚀 Server running on port ${PORT}`);
-        });
-    } catch(err) {
-        console.error('MongoDB Setup Error:', err.message);
+    } catch (err) {
+        log('CRITICAL: Database connection failed: ' + err.message);
     }
 }
-initDB();
+
+server.listen(PORT, '0.0.0.0', () => {
+    log(`🚀 Primary Server listening on port ${PORT}`);
+    initDB(); // Start DB in background
+});
 
 // Unique ID Generator
 function generateUserId(name, age) {
