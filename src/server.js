@@ -28,7 +28,7 @@ app.get('/debug/stats', (req, res) => {
 });
 
 app.get('/health', (req, res) => {
-    res.json({ status: 'ok', engine: 'Matchmaking Engine 4.0' });
+    res.json({ status: 'ok', engine: 'Matchmaking Engine 4.1 (Safe Boot)' });
 });
 
 // Simple log buffer for remote debugging
