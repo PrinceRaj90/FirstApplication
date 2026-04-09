@@ -215,8 +215,11 @@ wss.on('connection', (ws) => {
                 const myGender = myCol === 'male_users' ? 'male' : 'female';
                 const sleep = ms => new Promise(res => setTimeout(res, ms));
 
-                // 1. Mark self as looking
-                await db.collection(myCol).updateOne({ id: info.id }, { $set: { searching_for: pref, occupied: 'no' } });
+                // 1. Force state reset and mark as searching
+                await db.collection(myCol).updateOne(
+                    { id: info.id }, 
+                    { $set: { status: 'online', occupied: 'no', searching_for: pref } }
+                );
 
                 const myBlocks = await db.collection('blocks').find({ blocker_id: info.id }).toArray();
                 const blockedMe = await db.collection('blocks').find({ blocked_id: info.id }).toArray();
@@ -229,13 +232,8 @@ wss.on('connection', (ws) => {
                 for (let attempt = 0; attempt < 10; attempt++) {
                     const me = await db.collection(myCol).findOne({ id: info.id });
                     if (me && me.occupied === 'yes') {
-                        // COLLISION HANDLER: Someone already found us.
-                        // We must ensure we know WHO found us to link the WS.
-                        if (info.partnerWs) return; // Already linked by the other person's logic
-                        
-                        // If not linked yet, wait a moment for the other context to finish
-                        await sleep(300);
-                        if (info.partnerWs) return;
+                        // We were matched by someone else! Success.
+                        return; 
                     }
 
                     let colsToCheck = pref === 'random' ? ['female_users', 'male_users'] : (pref === 'female' ? ['female_users'] : ['male_users']);
@@ -243,14 +241,23 @@ wss.on('connection', (ws) => {
                     for (let oppCol of colsToCheck) {
                         const targets = [myGender, 'random'];
                         const match = await db.collection(oppCol).findOneAndUpdate(
-                            { status: 'online', occupied: 'no', searching_for: { $in: targets }, id: { $nin: excludedIds } },
-                            { $set: { occupied: 'yes', searching_for: null } }
+                            { 
+                                status: 'online', 
+                                occupied: 'no', 
+                                searching_for: { $in: targets }, 
+                                id: { $nin: excludedIds } 
+                            },
+                            { $set: { occupied: 'yes', searching_for: null } },
+                            { returnDocument: 'after' } // Ensure we get the document back
                         );
 
                         if (match) { 
-                            matchId = (match.value ? match.value.id : match.id); 
-                            finalOppCol = oppCol; 
-                            break; 
+                            const foundDoc = match.value || match;
+                            if (foundDoc && foundDoc.id) {
+                                matchId = foundDoc.id;
+                                finalOppCol = oppCol;
+                                break;
+                            }
                         }
                     }
 
@@ -261,6 +268,7 @@ wss.on('connection', (ws) => {
                 if (matchId) {
                     const partnerWs = idToWs.get(matchId);
                     if (partnerWs && wsClients.has(partnerWs)) {
+                        // ATOMIC PAIRING: Mark self as busy
                         await db.collection(myCol).updateOne({ id: info.id }, { $set: { occupied: 'yes', searching_for: null } });
                         
                         info.partnerWs = partnerWs;
@@ -269,14 +277,12 @@ wss.on('connection', (ws) => {
                         const me = await db.collection(myCol).findOne({ id: info.id });
                         const pt = await db.collection(finalOppCol).findOne({ id: matchId });
                         
-                        const msgForMe = JSON.stringify({ type: 'matched', partner_id: matchId, partner_name: pt.name, partner_age: pt.age });
-                        const msgForPartner = JSON.stringify({ type: 'matched', partner_id: info.id, partner_name: me.name, partner_age: me.age });
-                        
-                        ws.send(msgForMe);
-                        partnerWs.send(msgForPartner);
+                        ws.send(JSON.stringify({ type: 'matched', partner_id: matchId, partner_name: pt.name, partner_age: pt.age }));
+                        partnerWs.send(JSON.stringify({ type: 'matched', partner_id: info.id, partner_name: me.name, partner_age: me.age }));
                     } else {
+                        // Rollback only if partner vanished
                         await db.collection(finalOppCol).updateOne({ id: matchId }, { $set: { occupied: 'no', searching_for: pref } });
-                        ws.send(JSON.stringify({ type: 'no_match_found', error: 'Partner connection lost' }));
+                        ws.send(JSON.stringify({ type: 'no_match_found', retry: true }));
                     }
                 } else {
                     ws.send(JSON.stringify({ type: 'no_match_found' }));
