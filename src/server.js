@@ -27,12 +27,14 @@ app.get('/debug/stats', (req, res) => {
     });
 });
 
+// Consolidated Health Endpoint
 app.get('/health', (req, res) => {
     res.json({ 
         status: 'ok', 
-        engine: 'Matchmaking Engine 5.2 (Handshake Sync)',
+        engine: 'Matchmaking Engine 5.3 (Handshake-Production)',
         db_connected: !!db,
-        active_ws: wsClients.size
+        active_ws: wsClients.size,
+        timestamp: new Date().toISOString()
     });
 });
 
@@ -46,7 +48,8 @@ const log = (msg) => {
 };
 
 // === DATABASE SETUP (MONGODB) ===
-const uri = process.env.MONGO_URL || 'mongodb://localhost:27017/chat_app';
+// Support multiple Railway/Standard environment variable names
+const uri = process.env.MONGODB_URL || process.env.MONGO_URL || process.env.MONGO_URI || 'mongodb://localhost:27017/chat_app';
 const client = new MongoClient(uri);
 let db;
 
@@ -61,15 +64,16 @@ async function initDB() {
         log('Main DB Matchmaking Engine initialized.');
         
         // COLD START: Clear all stale matchmaking flags
-        await db.collection('male_users').updateMany({}, { $set: { status: 'offline', occupied: 'no', searching_for: null, handshake: null } });
-        await db.collection('female_users').updateMany({}, { $set: { status: 'offline', occupied: 'no', searching_for: null, handshake: null } });
+        await db.collection('male_users').updateMany({}, { $set: { status: 'offline', searching_for: null, handshake: null } });
+        await db.collection('female_users').updateMany({}, { $set: { status: 'offline', searching_for: null, handshake: null } });
+        await db.collection('other_users').updateMany({}, { $set: { status: 'offline', searching_for: null, handshake: null } });
     } catch (err) {
         log('CRITICAL: Database connection failed: ' + err.message);
     }
 }
 
-server.listen(PORT, () => {
-    log(`🚀 Primary Server listening on port ${PORT}`);
+server.listen(PORT, IP, () => {
+    log(`🚀 Primary Server listening on port ${PORT} at ${IP}`);
     initDB(); 
 });
 
@@ -83,9 +87,7 @@ function generateUserId(name, age) {
 
 // === REST API ENDPOINTS ===
 
-app.get('/health', (req, res) => {
-    res.json({ status: 'Backend is running', db: db ? 'connected' : 'disconnected' });
-});
+// (Removed duplicate health endpoint)
 
 app.post('/register', async (req, res) => {
     if (!db) return res.status(503).json({ error: 'Database not ready.' });
@@ -108,7 +110,8 @@ app.post('/register', async (req, res) => {
         const collectionName = sex === 'female' ? 'female_users' : 'male_users';
         const mCheck = await db.collection('male_users').findOne({ username });
         const fCheck = await db.collection('female_users').findOne({ username });
-        if (mCheck || fCheck) {
+        const oCheck = await db.collection('other_users').findOne({ username });
+        if (mCheck || fCheck || oCheck) {
             return res.status(409).json({ error: 'Username already exists!' });
         }
 
@@ -118,11 +121,12 @@ app.post('/register', async (req, res) => {
             userId = generateUserId(name, age);
             let mId = await db.collection('male_users').findOne({ id: userId });
             let fId = await db.collection('female_users').findOne({ id: userId });
-            if (!mId && !fId) idExists = false;
+            let oId = await db.collection('other_users').findOne({ id: userId });
+            if (!mId && !fId && !oId) idExists = false;
         }
 
         await db.collection(collectionName).insertOne({
-            id: userId, name, username, age, password, status: 'offline', occupied: 'no'
+            id: userId, name, username, age, password, status: 'offline'
         });
 
         res.status(201).json({ message: 'Registration successful!', id: userId, sex });
@@ -143,6 +147,11 @@ app.post('/login', async (req, res) => {
         if (!userRow) {
             userRow = await db.collection('female_users').findOne({ username, password });
             foundSex = 'female';
+        }
+
+        if (!userRow) {
+            userRow = await db.collection('other_users').findOne({ username, password });
+            foundSex = 'other';
         }
 
         if (!userRow) return res.status(401).json({ error: 'Invalid credentials.' });
@@ -224,7 +233,7 @@ wss.on('connection', (ws) => {
             const data = JSON.parse(message);
             
             if (data.type === 'init') {
-                const col = data.sex === 'female' ? 'female_users' : 'male_users';
+                const col = data.sex === 'female' ? 'female_users' : (data.sex === 'male' ? 'male_users' : 'other_users');
                 
                 // CRITICAL FIX: Clear any old 'ghost' connections for this ID
                 const oldWs = idToWs.get(data.id);
@@ -232,7 +241,7 @@ wss.on('connection', (ws) => {
                     wsClients.delete(oldWs);
                 }
 
-                await db.collection(col).updateOne({ id: data.id }, { $set: { status: 'online', occupied: 'no' } });
+                await db.collection(col).updateOne({ id: data.id }, { $set: { status: 'online' } });
 
                 wsClients.set(ws, { id: data.id, collection: col, partnerWs: null });
                 idToWs.set(data.id, ws);
@@ -243,7 +252,9 @@ wss.on('connection', (ws) => {
                 if (!info) { log("MATCH: No info found for WS"); return; }
                 const myCol = info.collection;
                 const pref = data.seeking_gender; 
-                const myGender = myCol === 'male_users' ? 'male' : 'female';
+                let myGender = 'male';
+                if (myCol === 'female_users') myGender = 'female';
+                else if (myCol === 'other_users') myGender = 'other';
                 const sleep = ms => new Promise(res => setTimeout(res, ms));
 
                 log(`MATCH START: ${info.id} (${myGender}) seeking ${pref}`);
@@ -251,7 +262,7 @@ wss.on('connection', (ws) => {
                 // 1. Enter the pool
                 await db.collection(myCol).updateOne(
                     { id: info.id }, 
-                    { $set: { status: 'online', occupied: 'no', searching_for: pref, handshake: null } }
+                    { $set: { status: 'online', searching_for: pref, handshake: null } }
                 );
 
                 const myBlocks = await db.collection('blocks').find({ blocker_id: info.id }).toArray();
@@ -260,29 +271,38 @@ wss.on('connection', (ws) => {
 
                 let matchId = null; 
                 let partnerCol = null;
+                let partnerDoc = null; // New variable to store partner info safely
 
-                // 2. HANSHAKE LOOP (Up to 8 seconds)
-                for (let attempt = 0; attempt < 16; attempt++) {
+                // 2. HANSHAKE LOOP (Up to 5 minutes at 200ms intervals)
+                for (let attempt = 0; attempt < 1500; attempt++) {
                     // Check if someone else FOUND and CLAIMED us
                     const me = await db.collection(myCol).findOne({ id: info.id });
                     if (me && me.handshake) {
                         matchId = me.handshake;
                         log(`MATCH HANDSHAKE: ${info.id} was claimed by ${matchId}`);
-                        // Determine partner's collection
+                        // Determine partner's collection AND GET THEIR NAME
                         const mCheck = await db.collection('male_users').findOne({ id: matchId });
-                        partnerCol = mCheck ? 'male_users' : 'female_users';
+                        const fCheck = await db.collection('female_users').findOne({ id: matchId });
+                        const oCheck = await db.collection('other_users').findOne({ id: matchId });
+
+                        partnerDoc = mCheck || fCheck || oCheck;
+                        partnerCol = mCheck ? 'male_users' : (fCheck ? 'female_users' : 'other_users');
                         break;
                     }
 
                     // Strict Specific / Hybrid Random Logic
-                    let colsToCheck = pref === 'random' ? ['female_users', 'male_users'] : (pref === 'female' ? ['female_users'] : ['male_users']);
+                    let colsToCheck = [];
+                    if (pref === 'random') colsToCheck = ['female_users', 'male_users', 'other_users'];
+                    else if (pref === 'female') colsToCheck = ['female_users'];
+                    else if (pref === 'male') colsToCheck = ['male_users'];
+                    else if (pref === 'other') colsToCheck = ['other_users'];
                     
                     for (let oppCol of colsToCheck) {
                         const targets = [myGender, 'random'];
                         // Try to ATOMICALLY claim someone
                         const match = await db.collection(oppCol).findOneAndUpdate(
-                            { status: 'online', occupied: 'no', searching_for: { $in: targets }, id: { $nin: excludedIds } },
-                            { $set: { occupied: 'yes', searching_for: null, handshake: info.id } },
+                            { searching_for: { $in: targets }, id: { $nin: excludedIds } },
+                            { $set: { searching_for: null, handshake: info.id } },
                             { returnDocument: 'after' }
                         );
 
@@ -291,16 +311,17 @@ wss.on('connection', (ws) => {
                             if (foundDoc && foundDoc.id) {
                                 matchId = foundDoc.id;
                                 partnerCol = oppCol;
+                                partnerDoc = foundDoc; // Store the claimed partner's doc
                                 log(`MATCH CLAIM: ${info.id} claimed ${matchId} from ${oppCol}`);
-                                // Mark SELF as occupied as well
-                                await db.collection(myCol).updateOne({ id: info.id }, { $set: { occupied: 'yes', searching_for: null } });
+                                // Mark SELF as searching-done
+                                await db.collection(myCol).updateOne({ id: info.id }, { $set: { searching_for: null } });
                                 break;
                             }
                         }
                     }
 
                     if (matchId) break;
-                    await sleep(500);
+                    await sleep(200);
                 }
 
                 if (matchId) {
@@ -310,23 +331,31 @@ wss.on('connection', (ws) => {
                         wsClients.get(partnerWs).partnerWs = ws;
                         
                         const me = await db.collection(myCol).findOne({ id: info.id });
-                        const pt = await db.collection(partnerCol).findOne({ id: matchId });
                         
-                        const matchedPayloadMe = { type: 'matched', partner_id: matchId, partner_name: pt.name, partner_age: pt.age };
-                        const matchedPayloadPt = { type: 'matched', partner_id: info.id, partner_name: me.name, partner_age: me.age };
-                        
-                        ws.send(JSON.stringify(matchedPayloadMe));
-                        partnerWs.send(JSON.stringify(matchedPayloadPt));
+                        // Safely get name with fallback
+                        const partnerName = (partnerDoc ? (partnerDoc.username || partnerDoc.name) : 'Stranger');
+
+                        ws.send(JSON.stringify({
+                            type: 'matched',
+                            partner_id: matchId,
+                            partner_name: partnerName
+                        }));
+
+                        partnerWs.send(JSON.stringify({
+                            type: 'matched',
+                            partner_id: info.id,
+                            partner_name: me.name
+                        }));
                         log(`MATCH RESOLVED: Bond established between ${info.id} and ${matchId}`);
                     } else {
                         log(`MATCH ERROR: Partner WS not found for ${matchId}. Rollback.`);
-                        await db.collection(partnerCol).updateOne({ id: matchId }, { $set: { occupied: 'no', handshake: null } });
-                        await db.collection(myCol).updateOne({ id: info.id }, { $set: { occupied: 'no', handshake: null } });
+                        await db.collection(partnerCol).updateOne({ id: matchId }, { $set: { handshake: null } });
+                        await db.collection(myCol).updateOne({ id: info.id }, { $set: { handshake: null } });
                         ws.send(JSON.stringify({ type: 'no_match_found', retry: true }));
                     }
                 } else {
                     log(`MATCH TIMEOUT: ${info.id} found no partners.`);
-                    await db.collection(myCol).updateOne({ id: info.id }, { $set: { occupied: 'no', searching_for: null, handshake: null } });
+                    await db.collection(myCol).updateOne({ id: info.id }, { $set: { searching_for: null, handshake: null } });
                     ws.send(JSON.stringify({ type: 'no_match_found' }));
                 }
             }
@@ -383,8 +412,13 @@ wss.on('connection', (ws) => {
                 const u1 = [info.id, data.target_id].sort()[0];
                 const u2 = [info.id, data.target_id].sort()[1];
                 await db.collection('friendships').updateOne({ user1_id: u1, user2_id: u2 }, { $set: { status: 'friends' } }, { upsert: true });
+                
                 const rWs = idToWs.get(data.target_id);
-                if (rWs) rWs.send(JSON.stringify({ type: 'friend_accepted', from_id: info.id }));
+                if (rWs && rWs.readyState === 1) {
+                    rWs.send(JSON.stringify({ type: 'friend_accepted', from_id: info.id }));
+                }
+                // Notify self to refresh list
+                ws.send(JSON.stringify({ type: 'friend_accepted', from_id: data.target_id, silent: true }));
             }
 
             else if (data.type === 'block_user') {
@@ -400,11 +434,14 @@ wss.on('connection', (ws) => {
         const info = wsClients.get(ws);
         if (info) {
             idToWs.delete(info.id);
-            await db.collection(info.collection).updateOne({ id: info.id }, { $set: { status: 'offline', occupied: 'no' } });
+            await db.collection(info.collection).updateOne(
+                { id: info.id }, 
+                { $set: { status: 'offline', searching_for: null, handshake: null } }
+            );
             if (info.partnerWs?.readyState === 1) {
                 info.partnerWs.send(JSON.stringify({ type: 'partner_disconnected' }));
                 const pInfo = wsClients.get(info.partnerWs);
-                if (pInfo) { pInfo.partnerWs = null; await db.collection(pInfo.collection).updateOne({ id: pInfo.id }, { $set: { occupied: 'no' } }); }
+                if (pInfo) { pInfo.partnerWs = null; await db.collection(pInfo.collection).updateOne({ id: pInfo.id }, { $set: { status: 'online' } }); }
             }
         }
         wsClients.delete(ws);
